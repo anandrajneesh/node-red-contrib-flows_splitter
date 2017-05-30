@@ -1,0 +1,482 @@
+var fs = require('fs-extra');
+var when = require('when');
+var nodeFn = require('when/node/function');
+var keys = require('when/keys');
+var fspath = require("path");
+var mkdirp = fs.mkdirs;
+
+var filter = require('filter-files')
+
+//var log = require("../log");
+
+var promiseDir = nodeFn.lift(mkdirp);
+
+var initialFlowLoadComplete = false;
+var settings;
+
+
+var flowsFile;
+var flowsFullPath;
+var flowsFileBackup;
+var flow_tabs = {};
+
+var credentialsFile;
+var credentialsFileBackup;
+var oldCredentialsFile;
+var sessionsFile;
+var libDir;
+var libFlowsDir;
+var globalSettingsFile;
+
+function getFileMeta(root, path) {
+    var fn = fspath.join(root, path);
+    var fd = fs.openSync(fn, "r");
+    var size = fs.fstatSync(fd).size;
+    var meta = {};
+    var read = 0;
+    var length = 10;
+    var remaining = "";
+    var buffer = Buffer(length);
+    while (read < size) {
+        read += fs.readSync(fd, buffer, 0, length);
+        var data = remaining + buffer.toString();
+        var parts = data.split("\n");
+        remaining = parts.splice(-1);
+        for (var i = 0; i < parts.length; i += 1) {
+            var match = /^\/\/ (\w+): (.*)/.exec(parts[i]);
+            if (match) {
+                meta[match[1]] = match[2];
+            } else {
+                read = size;
+                break;
+            }
+        }
+    }
+    fs.closeSync(fd);
+    return meta;
+}
+
+function getFileBody(root, path) {
+    var body = "";
+    var fn = fspath.join(root, path);
+    var fd = fs.openSync(fn, "r");
+    var size = fs.fstatSync(fd).size;
+    var scanning = true;
+    var read = 0;
+    var length = 50;
+    var remaining = "";
+    var buffer = Buffer(length);
+    while (read < size) {
+        var thisRead = fs.readSync(fd, buffer, 0, length);
+        read += thisRead;
+        if (scanning) {
+            var data = remaining + buffer.slice(0, thisRead).toString();
+            var parts = data.split("\n");
+            remaining = parts.splice(-1)[0];
+            for (var i = 0; i < parts.length; i += 1) {
+                if (!/^\/\/ \w+: /.test(parts[i])) {
+                    scanning = false;
+                    body += parts[i] + "\n";
+                }
+            }
+            if (!/^\/\/ \w+: /.test(remaining)) {
+                scanning = false;
+            }
+            if (!scanning) {
+                body += remaining;
+            }
+        } else {
+            body += buffer.slice(0, thisRead).toString();
+        }
+    }
+    fs.closeSync(fd);
+    return body;
+}
+
+/**
+ * Write content to a file using UTF8 encoding.
+ * This forces a fsync before completing to ensure
+ * the write hits disk.
+ */
+function writeFile(path, content) {
+    return when.promise(function (resolve, reject) {
+        var stream = fs.createWriteStream(path);
+        stream.on('open', function (fd) {
+            stream.end(content, 'utf8', function () {
+                fs.fsync(fd, resolve);
+            });
+        });
+        stream.on('error', function (err) {
+            reject(err);
+        });
+    });
+}
+
+function writeFlows(flows) {
+    return when.promise(function (resolve, reject) {
+        var type_tab_name = "tab";
+
+        var ffExt = fspath.extname(flowsFullPath);
+        var ffName = fspath.basename(flowsFullPath);
+        var ffBase = fspath.basename(flowsFullPath, ffExt);
+        var ffDir = fspath.dirname(flowsFullPath);
+
+        flow_tabs = {};
+
+        flows.forEach(function (flowComponent) {
+            if (flowComponent.type != type_tab_name)
+                return;
+            flow_tabs[flowComponent.id] = [];
+            flow_tabs[flowComponent.id].push(flowComponent);
+        });
+
+        flows.forEach(function (flowComponent) {
+            if (flowComponent.type == type_tab_name)
+                return;
+            flow_tabs[flowComponent.z].push(flowComponent);
+        });
+
+        var promises = [];
+
+        for (var tab_id in flow_tabs) {
+
+            var tab_components = flow_tabs[tab_id];
+            console.log(`tab_id ${tab_id}`);
+
+            var new_filename = ffName + '_tab_' + tab_id + ffExt;
+            var new_filepath = fspath.join(ffDir, new_filename)
+            var tab_flow_new = JSON.stringify(tab_components);
+
+            if (settings.flowFilePretty)
+                tab_flow_new = JSON.stringify(tab_components, null, 4);
+
+            try {
+                fs.renameSync(new_filepath, new_filepath + ".backup");
+            } catch (err) {}
+
+            console.log(`saved to ${new_filepath}`);
+            promises.push(writeFile(new_filepath, tab_flow_new));
+        }
+
+        return when.all(promises);
+    });
+}
+
+function readFile(path, backupPath, emptyResponse, type) {
+    return when.promise(function (resolve) {
+        fs.readFile(path, 'utf8', function (err, data) {
+            if (!err) {
+                if (data.length === 0) {
+                    //log.warn(log._("storage.localfilesystem.empty",{type:type}));
+                    try {
+                        var backupStat = fs.statSync(backupPath);
+                        if (backupStat.size === 0) {
+                            // Empty flows, empty backup - return empty flow
+                            return resolve(emptyResponse);
+                        }
+                        // Empty flows, restore backup
+                        //log.warn(log._("storage.localfilesystem.restore",{path:backupPath,type:type}));
+                        fs.copy(backupPath, path, function (backupCopyErr) {
+                            if (backupCopyErr) {
+                                // Restore backup failed
+                                //log.warn(log._("storage.localfilesystem.restore-fail",{message:backupCopyErr.toString(),type:type}));
+                                resolve([]);
+                            } else {
+                                // Loop back in to load the restored backup
+                                resolve(readFile(path, backupPath, emptyResponse, type));
+                            }
+                        });
+                        return;
+                    } catch (backupStatErr) {
+                        // Empty flow file, no back-up file
+                        return resolve(emptyResponse);
+                    }
+                }
+                try {
+                    return resolve(JSON.parse(data));
+                } catch (parseErr) {
+                    //log.warn(log._("storage.localfilesystem.invalid",{type:type}));
+                    return resolve(emptyResponse);
+                }
+            } else {
+                if (type === 'flow') {
+                    //log.info(log._("storage.localfilesystem.create",{type:type}));
+                }
+                resolve(emptyResponse);
+            }
+        });
+    });
+}
+
+var flowssplitter = {
+    init: function (_settings) {
+        settings = _settings;
+
+        var promises = [];
+
+        if (!settings.userDir) {
+            try {
+                fs.statSync(fspath.join(process.env.NODE_RED_HOME, ".config.json"));
+                settings.userDir = process.env.NODE_RED_HOME;
+            } catch (err) {
+                settings.userDir = fspath.join(process.env.HOME || process.env.HOMEPATH || process.env.USERPROFILE || process.env.NODE_RED_HOME, ".node-red");
+                if (!settings.readOnly) {
+                    promises.push(promiseDir(fspath.join(settings.userDir, "node_modules")));
+                }
+            }
+        }
+
+        if (settings.flowFile) {
+            flowsFile = settings.flowFile;
+            // handle Unix and Windows "C:\"
+            if ((flowsFile[0] == "/") || (flowsFile[1] == ":")) {
+                // Absolute path
+                flowsFullPath = flowsFile;
+            } else if (flowsFile.substring(0, 2) === "./") {
+                // Relative to cwd
+                flowsFullPath = fspath.join(process.cwd(), flowsFile);
+            } else {
+                try {
+                    fs.statSync(fspath.join(process.cwd(), flowsFile));
+                    // Found in cwd
+                    flowsFullPath = fspath.join(process.cwd(), flowsFile);
+                } catch (err) {
+                    // Use userDir
+                    flowsFullPath = fspath.join(settings.userDir, flowsFile);
+                }
+            }
+
+        } else {
+            flowsFile = 'flows_' + require('os').hostname() + '.json';
+            flowsFullPath = fspath.join(settings.userDir, flowsFile);
+        }
+        var ffExt = fspath.extname(flowsFullPath);
+        var ffName = fspath.basename(flowsFullPath);
+        var ffBase = fspath.basename(flowsFullPath, ffExt);
+        var ffDir = fspath.dirname(flowsFullPath);
+
+        credentialsFile = fspath.join(settings.userDir, ffBase + "_cred" + ffExt);
+        credentialsFileBackup = fspath.join(settings.userDir, "." + ffBase + "_cred" + ffExt + ".backup");
+
+        oldCredentialsFile = fspath.join(settings.userDir, "credentials.json");
+
+        flowsFileBackup = fspath.join(ffDir, "." + ffName + ".backup");
+
+        sessionsFile = fspath.join(settings.userDir, ".sessions.json");
+
+        libDir = fspath.join(settings.userDir, "lib");
+        libFlowsDir = fspath.join(libDir, "flows");
+
+        globalSettingsFile = fspath.join(settings.userDir, ".config.json");
+
+        if (!settings.readOnly) {
+            promises.push(promiseDir(libFlowsDir));
+        }
+
+        return when.all(promises);
+    },
+
+    getFlows: function () {
+        if (!initialFlowLoadComplete) {
+            initialFlowLoadComplete = true;
+            //log.info(log._("storage.localfilesystem.user-dir",{path:settings.userDir}));
+            //log.info(log._("storage.localfilesystem.flows-file",{path:flowsFullPath}));
+
+            //console.log(`initialFlowLoadComplete ${initialFlowLoadComplete}`);
+
+            fs.exists(flowsFullPath, (exists) => {
+                if (exists) {
+
+                    readFile(flowsFullPath, flowsFileBackup, [], 'flow').then(values => {
+                        fs.unlink(flowsFullPath);
+                        writeFlows(values);
+                    });
+                }
+            });
+        }
+
+        //console.log(`flowsFullPath ${flowsFullPath}`);
+        //console.log(`flowsFileBackup ${flowsFileBackup}`);
+
+        //return readFile(flowsFullPath, flowsFileBackup, [], 'flow');
+
+        var ffExt = fspath.extname(flowsFullPath);
+        var ffName = fspath.basename(flowsFullPath);
+        var ffBase = fspath.basename(flowsFullPath, ffExt);
+        var ffDir = fspath.dirname(flowsFullPath);
+
+        var flow_tab_files = filter.sync(ffDir, function (fp) {
+            return new RegExp(ffName + "_tab_.+" + ffExt + "$", "g").test(fp);
+        });
+
+        console.log(flow_tab_files);
+        return when.promise(function (resolve, reject) {
+
+            var promises = [];
+
+            flow_tab_files.forEach(function (flow_tab) {
+                promises.push(readFile(flow_tab, flow_tab + ".backup", [], 'flow'));
+            });
+
+            return when.all(promises).then(values => {
+                var flows = [];
+                // TODO why it is an array of one element
+                values.forEach(function (elements) {
+                    elements.forEach(function (tab_component) {
+                        flows.push(tab_component);
+                    });
+                });
+                return resolve(flows);
+            });
+        });
+
+    },
+
+    saveFlows: function (flows) {
+
+        if (settings.readOnly) {
+            return when.resolve();
+        }
+
+        return writeFlows(flows);
+    },
+
+    getCredentials: function () {
+        return readFile(credentialsFile, credentialsFileBackup, {}, 'credentials');
+    },
+
+    saveCredentials: function (credentials) {
+        if (settings.readOnly) {
+            return when.resolve();
+        }
+
+        try {
+            fs.renameSync(credentialsFile, credentialsFileBackup);
+        } catch (err) {}
+        var credentialData;
+        if (settings.flowFilePretty) {
+            credentialData = JSON.stringify(credentials, null, 4);
+        } else {
+            credentialData = JSON.stringify(credentials);
+        }
+        return writeFile(credentialsFile, credentialData);
+    },
+
+    getSettings: function () {
+        return when.promise(function (resolve, reject) {
+            fs.readFile(globalSettingsFile, 'utf8', function (err, data) {
+                if (!err) {
+                    try {
+                        return resolve(JSON.parse(data));
+                    } catch (err2) {
+                        //log.trace("Corrupted config detected - resetting");
+                    }
+                }
+                return resolve({});
+            })
+        })
+    },
+    saveSettings: function (newSettings) {
+        if (settings.readOnly) {
+            return when.resolve();
+        }
+        return writeFile(globalSettingsFile, JSON.stringify(newSettings, null, 1));
+    },
+    getSessions: function () {
+        return when.promise(function (resolve, reject) {
+            fs.readFile(sessionsFile, 'utf8', function (err, data) {
+                if (!err) {
+                    try {
+                        return resolve(JSON.parse(data));
+                    } catch (err2) {
+                        //log.trace("Corrupted sessions file - resetting");
+                    }
+                }
+                resolve({});
+            })
+        });
+    },
+    saveSessions: function (sessions) {
+        if (settings.readOnly) {
+            return when.resolve();
+        }
+        return writeFile(sessionsFile, JSON.stringify(sessions));
+    },
+
+    getLibraryEntry: function (type, path) {
+        var root = fspath.join(libDir, type);
+        var rootPath = fspath.join(libDir, type, path);
+
+        // don't create the folder if it does not exist - we are only reading....
+        return nodeFn.call(fs.lstat, rootPath).then(function (stats) {
+            if (stats.isFile()) {
+                return getFileBody(root, path);
+            }
+            if (path.substr(-1) == '/') {
+                path = path.substr(0, path.length - 1);
+            }
+            return nodeFn.call(fs.readdir, rootPath).then(function (fns) {
+                var dirs = [];
+                var files = [];
+                fns.sort().filter(function (fn) {
+                    var fullPath = fspath.join(path, fn);
+                    var absoluteFullPath = fspath.join(root, fullPath);
+                    if (fn[0] != ".") {
+                        var stats = fs.lstatSync(absoluteFullPath);
+                        if (stats.isDirectory()) {
+                            dirs.push(fn);
+                        } else {
+                            var meta = getFileMeta(root, fullPath);
+                            meta.fn = fn;
+                            files.push(meta);
+                        }
+                    }
+                });
+                return dirs.concat(files);
+            });
+        }).otherwise(function (err) {
+            // if path is empty, then assume it was a folder, return empty
+            if (path === "") {
+                return [];
+            }
+
+            // if path ends with slash, it was a folder
+            // so return empty
+            if (path.substr(-1) == '/') {
+                return [];
+            }
+
+            // else path was specified, but did not exist,
+            // check for path.json as an alternative if flows
+            if (type === "flows" && !/\.json$/.test(path)) {
+                return localfilesystem.getLibraryEntry(type, path + ".json")
+                    .otherwise(function (e) {
+                        throw err;
+                    });
+            } else {
+                throw err;
+            }
+        });
+    },
+
+    saveLibraryEntry: function (type, path, meta, body) {
+        if (settings.readOnly) {
+            return when.resolve();
+        }
+        var fn = fspath.join(libDir, type, path);
+        var headers = "";
+        for (var i in meta) {
+            if (meta.hasOwnProperty(i)) {
+                headers += "// " + i + ": " + meta[i] + "\n";
+            }
+        }
+        if (type === "flows" && settings.flowFilePretty) {
+            body = JSON.stringify(JSON.parse(body), null, 4);
+        }
+        return promiseDir(fspath.dirname(fn)).then(function () {
+            writeFile(fn, headers + body);
+        });
+    }
+};
+
+module.exports = flowssplitter;
