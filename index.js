@@ -18,7 +18,7 @@ var settings;
 var flowsFile;
 var flowsFullPath;
 var flowsFileBackup;
-var flow_tabs = {};
+
 
 var credentialsFile;
 var credentialsFileBackup;
@@ -121,34 +121,41 @@ function writeFlows(flows) {
         var ffBase = fspath.basename(flowsFullPath, ffExt);
         var ffDir = fspath.dirname(flowsFullPath);
 
-        flow_tabs = {};
+        var flow_tabs = {};
+        var flow_tabs_order = [];
+        flows.forEach(function (flowElements) {
+            var flowElementsStr = JSON.stringify(flowElements);
 
-        flows.forEach(function (flowComponent) {
-            if (flowComponent.type != type_tab_name)
+            if (flowElements.type != type_tab_name)
                 return;
-            flow_tabs[flowComponent.id] = [];
-            flow_tabs[flowComponent.id].push(flowComponent);
+            flow_tabs[flowElements.id] = [];
+            flow_tabs[flowElements.id].push(flowElements);
+            flow_tabs_order.push(flowElements.id);
         });
 
-        flows.forEach(function (flowComponent) {
-            if (flowComponent.type == type_tab_name)
+        flows.forEach(function (flowElements) {
+            if (flowElements.type == type_tab_name)
                 return;
-            flow_tabs[flowComponent.z].push(flowComponent);
+            flow_tabs[flowElements.z].push(flowElements);
         });
 
         var promises = [];
 
-        for (var tab_id in flow_tabs) {
+        var tab_idx = 0;
+        flow_tabs_order.forEach(function (tab_id) {
 
-            var tab_components = flow_tabs[tab_id];
-            console.log(`tab_id ${tab_id}`);
+            var tab_contents = flow_tabs[tab_id];
 
-            var new_filename = ffName + '_tab_' + tab_id + ffExt;
+            //console.log(`tab index ${tab_idx}`);
+            //console.log(`tab_id ${tab_id}`);
+            //console.log(`tab_components ${tab_contents}`);
+
+            var new_filename = ffBase + '_tab_' + (++tab_idx) + ffExt;
             var new_filepath = fspath.join(ffDir, new_filename)
-            var tab_flow_new = JSON.stringify(tab_components);
+            var tab_flow_new = JSON.stringify(tab_contents);
 
             if (settings.flowFilePretty)
-                tab_flow_new = JSON.stringify(tab_components, null, 4);
+                tab_flow_new = JSON.stringify(tab_contents, null, 4);
 
             try {
                 fs.renameSync(new_filepath, new_filepath + ".backup");
@@ -156,9 +163,11 @@ function writeFlows(flows) {
 
             console.log(`saved to ${new_filepath}`);
             promises.push(writeFile(new_filepath, tab_flow_new));
-        }
+        });
 
-        return when.all(promises);
+        when.all(promises).then(() => {
+            resolve();
+        });
     });
 }
 
@@ -277,27 +286,6 @@ var flowssplitter = {
     },
 
     getFlows: function () {
-        if (!initialFlowLoadComplete) {
-            initialFlowLoadComplete = true;
-            //log.info(log._("storage.localfilesystem.user-dir",{path:settings.userDir}));
-            //log.info(log._("storage.localfilesystem.flows-file",{path:flowsFullPath}));
-
-            //console.log(`initialFlowLoadComplete ${initialFlowLoadComplete}`);
-
-            fs.exists(flowsFullPath, (exists) => {
-                if (exists) {
-
-                    readFile(flowsFullPath, flowsFileBackup, [], 'flow').then(values => {
-                        fs.unlink(flowsFullPath);
-                        writeFlows(values);
-                    });
-                }
-            });
-        }
-
-        //console.log(`flowsFullPath ${flowsFullPath}`);
-        //console.log(`flowsFileBackup ${flowsFileBackup}`);
-
         //return readFile(flowsFullPath, flowsFileBackup, [], 'flow');
 
         var ffExt = fspath.extname(flowsFullPath);
@@ -305,31 +293,53 @@ var flowssplitter = {
         var ffBase = fspath.basename(flowsFullPath, ffExt);
         var ffDir = fspath.dirname(flowsFullPath);
 
-        var flow_tab_files = filter.sync(ffDir, function (fp) {
-            return new RegExp(ffName + "_tab_.+" + ffExt + "$", "g").test(fp);
-        });
+        return when.promise((resolve, reject) => {
 
-        console.log(flow_tab_files);
-        return when.promise(function (resolve, reject) {
+            if (!initialFlowLoadComplete) {
+                initialFlowLoadComplete = true;
 
-            var promises = [];
+                //log.info(log._("storage.localfilesystem.user-dir",{path:settings.userDir}));
+                //log.info(log._("storage.localfilesystem.flows-file",{path:flowsFullPath}));
 
-            flow_tab_files.forEach(function (flow_tab) {
-                promises.push(readFile(flow_tab, flow_tab + ".backup", [], 'flow'));
-            });
+                if (fs.existsSync(flowsFullPath)) {
+                    readFile(flowsFullPath, flowsFileBackup, [], 'flow').then(function (flows) {
+                        fs.unlink(flowsFullPath);
+                        return writeFlows(flows);
+                    }).then(() => {
+                        resolve();
+                    })
+                    return;
+                }
+            }
+            console.log('skip');
+            resolve();
+        }).then(() => {
+            return when.promise((resolve, reject) => {
+                function escapeRegExp(str) {
+                    return str.replace(/[\-\[\]\/\{\}\(\)\*\+\?\.\\\^\$\|]/g, "\\$&");
+                }
+                var regex_filter = escapeRegExp(ffBase) + "_tab_\\d+" + escapeRegExp(ffExt) + "$";
 
-            return when.all(promises).then(values => {
-                var flows = [];
-                // TODO why it is an array of one element
-                values.forEach(function (elements) {
-                    elements.forEach(function (tab_component) {
-                        flows.push(tab_component);
-                    });
+                var flow_tab_files = filter.sync(ffDir, function (fp) {
+                    return new RegExp(regex_filter, "g").test(fp);
                 });
-                return resolve(flows);
+
+                var promises = [];
+                flow_tab_files.forEach(function (flow_tab) {
+                    promises.push(readFile(flow_tab, flow_tab + ".backup", [], 'flow'));
+                });
+
+                return when.all(promises).then(values => {
+                    var flows = [];
+                    values.forEach(function (elements) {
+                        elements.forEach(function (tab_component) {
+                            flows.push(tab_component);
+                        });
+                    });
+                    resolve(flows);
+                });
             });
         });
-
     },
 
     saveFlows: function (flows) {
