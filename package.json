@@ -10,6 +10,8 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "filter-files": "^0.4.0"
+    "filter-files": "^0.4.0",
+    "fs-extra": "^3.0.1",
+    "when": "^3.7.8"
   }
 }

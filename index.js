@@ -121,6 +121,7 @@ function writeFlows(flows) {
         var ffBase = fspath.basename(flowsFullPath, ffExt);
         var ffDir = fspath.dirname(flowsFullPath);
 
+        var flow_orphan = [];
         var flow_tabs = {};
         var flow_tabs_order = [];
         flows.forEach(function (flowElements) {
@@ -136,11 +137,31 @@ function writeFlows(flows) {
         flows.forEach(function (flowElements) {
             if (flowElements.type == type_tab_name)
                 return;
+            // console.log(`... ${flowElements.id}`);
+            if (!flowElements.z) {
+                flow_orphan.push(flowElements);
+                return;
+            }
             flow_tabs[flowElements.z].push(flowElements);
         });
 
         var promises = [];
 
+        if (flow_orphan.length > 0) {
+            var new_filename = ffBase + '_tab_orphan' + ffExt;
+            var new_filepath = fspath.join(ffDir, new_filename);
+
+            var tab_flow_new = JSON.stringify(flow_orphan);
+            if (settings.flowFilePretty)
+                tab_flow_new = JSON.stringify(flow_orphan, null, 4);
+
+            try {
+                fs.renameSync(new_filepath, new_filepath + ".backup");
+            } catch (err) {}
+
+            console.log(`saved to '${new_filepath}' ${flow_orphan.length} elements`);
+            promises.push(writeFile(new_filepath, tab_flow_new));
+        }
         var tab_idx = 0;
         flow_tabs_order.forEach(function (tab_id) {
 
@@ -151,9 +172,9 @@ function writeFlows(flows) {
             //console.log(`tab_components ${tab_contents}`);
 
             var new_filename = ffBase + '_tab_' + (++tab_idx) + ffExt;
-            var new_filepath = fspath.join(ffDir, new_filename)
-            var tab_flow_new = JSON.stringify(tab_contents);
+            var new_filepath = fspath.join(ffDir, new_filename);
 
+            var tab_flow_new = JSON.stringify(tab_contents);
             if (settings.flowFilePretty)
                 tab_flow_new = JSON.stringify(tab_contents, null, 4);
 
@@ -161,7 +182,7 @@ function writeFlows(flows) {
                 fs.renameSync(new_filepath, new_filepath + ".backup");
             } catch (err) {}
 
-            console.log(`saved to ${new_filepath}`);
+            console.log(`saved to '${new_filepath}' ${tab_flow_new.length} elements`);
             promises.push(writeFile(new_filepath, tab_flow_new));
         });
 
@@ -328,6 +349,11 @@ var flowssplitter = {
                 flow_tab_files.forEach(function (flow_tab) {
                     promises.push(readFile(flow_tab, flow_tab + ".backup", [], 'flow'));
                 });
+
+                var orphan_filename = ffBase + '_tab_orphan' + ffExt;
+                var orphan_filepath = fspath.join(ffDir, orphan_filename);
+                if (fs.existsSync(orphan_filepath))
+                    promises.push(readFile(orphan_filepath, orphan_filepath + ".backup", [], 'flow'));
 
                 return when.all(promises).then(values => {
                     var flows = [];
