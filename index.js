@@ -14,6 +14,9 @@ var promiseDir = nodeFn.lift(mkdirp);
 var initialFlowLoadComplete = false;
 var settings;
 
+const type_tab_name = "tab";
+const type_subflow_name = "subflow";
+var types_to_split = [type_tab_name,type_subflow_name];
 
 var flowsFile;
 var flowsFullPath;
@@ -27,6 +30,10 @@ var sessionsFile;
 var libDir;
 var libFlowsDir;
 var globalSettingsFile;
+
+Array.prototype.contains = function(element){
+    return this.indexOf(element) > -1;
+};
 
 function getFileMeta(root, path) {
     var fn = fspath.join(root, path);
@@ -114,8 +121,7 @@ function writeFile(path, content) {
 
 function writeFlows(flows) {
     return when.promise(function (resolve, reject) {
-        var type_tab_name = "tab";
-
+        
         var ffExt = fspath.extname(flowsFullPath);
         var ffName = fspath.basename(flowsFullPath);
         var ffBase = fspath.basename(flowsFullPath, ffExt);
@@ -127,7 +133,7 @@ function writeFlows(flows) {
         flows.forEach(function (flowElements) {
             var flowElementsStr = JSON.stringify(flowElements);
 
-            if (flowElements.type != type_tab_name)
+            if (!types_to_split.contains(flowElements.type))
                 return;
             flow_tabs[flowElements.id] = [];
             flow_tabs[flowElements.id].push(flowElements);
@@ -135,7 +141,7 @@ function writeFlows(flows) {
         });
 
         flows.forEach(function (flowElements) {
-            if (flowElements.type == type_tab_name)
+            if (types_to_split.contains(flowElements.type))
                 return;
             // console.log(`... ${flowElements.id}`);
             if (!flowElements.z) {
@@ -164,8 +170,9 @@ function writeFlows(flows) {
         }
         var tab_idx = 0;
         flow_tabs_order.forEach(function (tab_id) {
-
+            
             var tab_contents = flow_tabs[tab_id];
+            var first_component = tab_contents[0];
 
             //console.log(`tab index ${tab_idx}`);
             //console.log(`tab_id ${tab_id}`);
@@ -182,7 +189,7 @@ function writeFlows(flows) {
                 fs.renameSync(new_filepath, new_filepath + ".backup");
             } catch (err) {}
 
-            console.log(`saved to '${new_filepath}' ${tab_flow_new.length} elements`);
+            console.log(`saved to '${new_filepath}' ${tab_contents.length} elements of type ${first_component.type}`);
             promises.push(writeFile(new_filepath, tab_flow_new));
         });
 
