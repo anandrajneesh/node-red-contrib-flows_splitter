@@ -16,7 +16,7 @@ var settings;
 
 const type_tab_name = "tab";
 const type_subflow_name = "subflow";
-var types_to_split = [type_tab_name,type_subflow_name];
+var types_to_split = [type_tab_name, type_subflow_name];
 
 var flowsFile;
 var flowsFullPath;
@@ -31,7 +31,7 @@ var libDir;
 var libFlowsDir;
 var globalSettingsFile;
 
-Array.prototype.contains = function(element){
+Array.prototype.contains = function (element) {
     return this.indexOf(element) > -1;
 };
 
@@ -121,7 +121,7 @@ function writeFile(path, content) {
 
 function writeFlows(flows) {
     return when.promise(function (resolve, reject) {
-        
+
         var ffExt = fspath.extname(flowsFullPath);
         var ffName = fspath.basename(flowsFullPath);
         var ffBase = fspath.basename(flowsFullPath, ffExt);
@@ -130,14 +130,22 @@ function writeFlows(flows) {
         var flow_orphan = [];
         var flow_tabs = {};
         var flow_tabs_order = [];
+        var subflow_items = {};
+
         flows.forEach(function (flowElements) {
             var flowElementsStr = JSON.stringify(flowElements);
 
-            if (!types_to_split.contains(flowElements.type))
-                return;
-            flow_tabs[flowElements.id] = [];
-            flow_tabs[flowElements.id].push(flowElements);
-            flow_tabs_order.push(flowElements.id);
+            if (flowElements.type == type_tab_name) {
+                flow_tabs[flowElements.id] = [];
+                flow_tabs[flowElements.id].push(flowElements);
+                flow_tabs_order.push(flowElements.id);
+            }
+
+            if (flowElements.type == type_subflow_name) {
+                subflow_items[flowElements.id] = [];
+                subflow_items[flowElements.id].push(flowElements);
+            }
+
         });
 
         flows.forEach(function (flowElements) {
@@ -151,10 +159,11 @@ function writeFlows(flows) {
             flow_tabs[flowElements.z].push(flowElements);
         });
 
+        var files_to_write = {};
         var promises = [];
 
         if (flow_orphan.length > 0) {
-            var new_filename = ffBase + '_tab_orphan' + ffExt;
+            var new_filename = ffBase + '_orphans' + ffExt;
             var new_filepath = fspath.join(ffDir, new_filename);
 
             var tab_flow_new = JSON.stringify(flow_orphan);
@@ -170,13 +179,9 @@ function writeFlows(flows) {
         }
         var tab_idx = 0;
         flow_tabs_order.forEach(function (tab_id) {
-            
+
             var tab_contents = flow_tabs[tab_id];
             var first_component = tab_contents[0];
-
-            //console.log(`tab index ${tab_idx}`);
-            //console.log(`tab_id ${tab_id}`);
-            //console.log(`tab_components ${tab_contents}`);
 
             var new_filename = ffBase + '_tab_' + (++tab_idx) + ffExt;
             var new_filepath = fspath.join(ffDir, new_filename);
@@ -192,6 +197,8 @@ function writeFlows(flows) {
             console.log(`saved to '${new_filepath}' ${tab_contents.length} elements of type ${first_component.type}`);
             promises.push(writeFile(new_filepath, tab_flow_new));
         });
+
+        
 
         when.all(promises).then(() => {
             resolve();
@@ -346,18 +353,28 @@ var flowssplitter = {
                 function escapeRegExp(str) {
                     return str.replace(/[\-\[\]\/\{\}\(\)\*\+\?\.\\\^\$\|]/g, "\\$&");
                 }
-                var regex_filter = escapeRegExp(ffBase) + "_tab_\\d+" + escapeRegExp(ffExt) + "$";
-
-                var flow_tab_files = filter.sync(ffDir, function (fp) {
-                    return new RegExp(regex_filter, "g").test(fp);
-                });
-
                 var promises = [];
-                flow_tab_files.forEach(function (flow_tab) {
+
+                // tabs
+                var tab_regex_filter = escapeRegExp(ffBase) + "_tab_\\d+" + escapeRegExp(ffExt) + "$";
+                var tab_files = filter.sync(ffDir, function (fp) {
+                    return new RegExp(tab_regex_filter, "g").test(fp);
+                });
+                tab_files.forEach(function (flow_tab) {
                     promises.push(readFile(flow_tab, flow_tab + ".backup", [], 'flow'));
                 });
 
-                var orphan_filename = ffBase + '_tab_orphan' + ffExt;
+                // subflows
+                var subflow_regex_filter = escapeRegExp(ffBase) + "_subflow_.+" + escapeRegExp(ffExt) + "$";
+                var subflow_files = filter.sync(ffDir, function (fp) {
+                    return new RegExp(subflow_regex_filter, "g").test(fp);
+                });
+                subflow_files.forEach(function (subflow) {
+                    promises.push(readFile(subflow, subflow + ".backup", [], 'flow'));
+                });
+
+                // orphan
+                var orphan_filename = ffBase + '_orphans' + ffExt;
                 var orphan_filepath = fspath.join(ffDir, orphan_filename);
                 if (fs.existsSync(orphan_filepath))
                     promises.push(readFile(orphan_filepath, orphan_filepath + ".backup", [], 'flow'));
