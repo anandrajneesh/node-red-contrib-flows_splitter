@@ -7,7 +7,7 @@ var mkdirp = fs.mkdirs;
 
 var filter = require('filter-files')
 
-//var log = require("../log");
+var log = require("../node-red/red/runtime/log");
 
 var promiseDir = nodeFn.lift(mkdirp);
 
@@ -34,6 +34,196 @@ var globalSettingsFile;
 Array.prototype.contains = function (element) {
     return this.indexOf(element) > -1;
 };
+
+function writeFlows(flows) {
+
+    var ffExt = fspath.extname(flowsFullPath);
+    var ffName = fspath.basename(flowsFullPath);
+    var ffBase = fspath.basename(flowsFullPath, ffExt);
+    var ffDir = fspath.dirname(flowsFullPath);
+
+    return when.promise(function (resolve, reject) {
+
+        var _orphans = [];
+        var _tabs = {};
+        var _tabs_order = [];
+        var _subflows = {};
+
+        // find out how to split into sections
+        flows.forEach(function (flowElements) {
+            var flowElementsStr = JSON.stringify(flowElements);
+
+            if (flowElements.type == type_tab_name) {
+                _tabs[flowElements.id] = [];
+                _tabs[flowElements.id].push(flowElements);
+                _tabs_order.push(flowElements.id);
+            }
+
+            if (flowElements.type == type_subflow_name) {
+                _subflows[flowElements.id] = [];
+                _subflows[flowElements.id].push(flowElements);
+            }
+
+        });
+
+        // save items component in the right section
+        flows.forEach(function (flowElements) {
+
+            // item in types_to_split are already taken care of before
+            if (types_to_split.contains(flowElements.type))
+                return;
+
+            // orphan
+            if (!flowElements.z) {
+                _orphans.push(flowElements);
+                return;
+            }
+
+            // linked to a tab
+            if (flowElements.z in _tabs) {
+                _tabs[flowElements.z].push(flowElements);
+                return;
+            }
+
+            //linked to a subflow
+            if (flowElements.z in _subflows) {
+                _subflows[flowElements.z].push(flowElements);
+                return;
+            }
+
+            console.warn(`Element ${flowElements.id} is not linked to any section but still contains a z of '${flowElements.z}'`);
+        });
+
+        var files_to_write = {};
+        var promises = [];
+
+        // orphans
+        if (_orphans.length > 0) {
+
+            var file_path = fspath.join(ffDir, ffBase + '_orphans' + ffExt);
+            var file_content = _orphans;
+
+            console.log(`saved ${_orphans.length} orphan(s) to '${file_path}'`);
+            files_to_write[file_path] = file_content;
+        }
+
+        // tabs
+        var tab_idx = 0;
+        _tabs_order.forEach(function (tab_id) {
+
+            var file_path = fspath.join(ffDir, ffBase + '_tab_' + (++tab_idx) + ffExt);
+            var file_content = _tabs[tab_id];
+
+            console.log(`saved tab index ${tab_idx} with ${file_content.length} element(s) to '${file_path}'`);
+            files_to_write[file_path] = file_content;
+        });
+
+        // subflows
+         Object.keys(_subflows).forEach(function (key) {
+
+            var file_path = fspath.join(ffDir, `${ffBase}_subflow_${key}${ffExt}`);
+            var file_content = _subflows[key];
+
+            console.log(`saved subflow id ${key} with ${file_content.length} element(s) to '${file_path}'`);
+            files_to_write[file_path] = file_content;
+        });
+
+        // create promises for every file
+        Object.keys(files_to_write).forEach(function (key) {
+
+            var file_path = key;
+            var file_contentStr = files_to_write[key];
+
+            var file_content = JSON.stringify(file_contentStr);
+            if (settings.flowFilePretty)
+                file_content = JSON.stringify(file_contentStr, null, 4);
+
+            try {
+                fs.renameSync(file_path, file_path + ".backup");
+            } catch (err) {}
+
+            promises.push(writeFile(file_path, file_content));
+        });
+
+        when.all(promises).then(() => {
+            resolve();
+        });
+    });
+}
+
+function readFlows() {
+    var ffExt = fspath.extname(flowsFullPath);
+    var ffName = fspath.basename(flowsFullPath);
+    var ffBase = fspath.basename(flowsFullPath, ffExt);
+    var ffDir = fspath.dirname(flowsFullPath);
+
+    return when.promise((resolve, reject) => {
+
+        if (!initialFlowLoadComplete) {
+            initialFlowLoadComplete = true;
+
+            log.info(log._("storage.localfilesystem.user-dir", {
+                path: settings.userDir
+            }));
+            log.info(log._("storage.localfilesystem.flows-file", {
+                path: flowsFullPath
+            }));
+
+            if (fs.existsSync(flowsFullPath)) {
+                readFile(flowsFullPath, flowsFileBackup, [], 'flow').then(function (flows) {
+                    fs.unlink(flowsFullPath);
+                    return writeFlows(flows);
+                }).then(() => {
+                    resolve();
+                })
+                return;
+            }
+        }
+        console.log('skip');
+        resolve();
+    }).then(() => {
+        return when.promise((resolve, reject) => {
+            function escapeRegExp(str) {
+                return str.replace(/[\-\[\]\/\{\}\(\)\*\+\?\.\\\^\$\|]/g, "\\$&");
+            }
+            var promises = [];
+
+            // tabs
+            var tab_regex_filter = escapeRegExp(ffBase) + "_tab_\\d+" + escapeRegExp(ffExt) + "$";
+            var tab_files = filter.sync(ffDir, function (fp) {
+                return new RegExp(tab_regex_filter, "g").test(fp);
+            });
+            tab_files.forEach(function (flow_tab) {
+                promises.push(readFile(flow_tab, flow_tab + ".backup", [], 'flow'));
+            });
+
+            // subflows
+            var subflow_regex_filter = escapeRegExp(ffBase) + "_subflow_.+" + escapeRegExp(ffExt) + "$";
+            var subflow_files = filter.sync(ffDir, function (fp) {
+                return new RegExp(subflow_regex_filter, "g").test(fp);
+            });
+            subflow_files.forEach(function (subflow) {
+                promises.push(readFile(subflow, subflow + ".backup", [], 'flow'));
+            });
+
+            // orphan
+            var orphan_filename = ffBase + '_orphans' + ffExt;
+            var orphan_filepath = fspath.join(ffDir, orphan_filename);
+            if (fs.existsSync(orphan_filepath))
+                promises.push(readFile(orphan_filepath, orphan_filepath + ".backup", [], 'flow'));
+
+            return when.all(promises).then(values => {
+                var flows = [];
+                values.forEach(function (elements) {
+                    elements.forEach(function (tab_component) {
+                        flows.push(tab_component);
+                    });
+                });
+                resolve(flows);
+            });
+        });
+    });
+}
 
 function getFileMeta(root, path) {
     var fn = fspath.join(root, path);
@@ -119,99 +309,14 @@ function writeFile(path, content) {
     });
 }
 
-function writeFlows(flows) {
-    return when.promise(function (resolve, reject) {
-
-        var ffExt = fspath.extname(flowsFullPath);
-        var ffName = fspath.basename(flowsFullPath);
-        var ffBase = fspath.basename(flowsFullPath, ffExt);
-        var ffDir = fspath.dirname(flowsFullPath);
-
-        var flow_orphan = [];
-        var flow_tabs = {};
-        var flow_tabs_order = [];
-        var subflow_items = {};
-
-        flows.forEach(function (flowElements) {
-            var flowElementsStr = JSON.stringify(flowElements);
-
-            if (flowElements.type == type_tab_name) {
-                flow_tabs[flowElements.id] = [];
-                flow_tabs[flowElements.id].push(flowElements);
-                flow_tabs_order.push(flowElements.id);
-            }
-
-            if (flowElements.type == type_subflow_name) {
-                subflow_items[flowElements.id] = [];
-                subflow_items[flowElements.id].push(flowElements);
-            }
-
-        });
-
-        flows.forEach(function (flowElements) {
-            if (types_to_split.contains(flowElements.type))
-                return;
-            // console.log(`... ${flowElements.id}`);
-            if (!flowElements.z) {
-                flow_orphan.push(flowElements);
-                return;
-            }
-            flow_tabs[flowElements.z].push(flowElements);
-        });
-
-        var files_to_write = {};
-        var promises = [];
-
-        if (flow_orphan.length > 0) {
-            var new_filename = ffBase + '_orphans' + ffExt;
-            var new_filepath = fspath.join(ffDir, new_filename);
-
-            var tab_flow_new = JSON.stringify(flow_orphan);
-            if (settings.flowFilePretty)
-                tab_flow_new = JSON.stringify(flow_orphan, null, 4);
-
-            try {
-                fs.renameSync(new_filepath, new_filepath + ".backup");
-            } catch (err) {}
-
-            console.log(`saved to '${new_filepath}' ${flow_orphan.length} elements`);
-            promises.push(writeFile(new_filepath, tab_flow_new));
-        }
-        var tab_idx = 0;
-        flow_tabs_order.forEach(function (tab_id) {
-
-            var tab_contents = flow_tabs[tab_id];
-            var first_component = tab_contents[0];
-
-            var new_filename = ffBase + '_tab_' + (++tab_idx) + ffExt;
-            var new_filepath = fspath.join(ffDir, new_filename);
-
-            var tab_flow_new = JSON.stringify(tab_contents);
-            if (settings.flowFilePretty)
-                tab_flow_new = JSON.stringify(tab_contents, null, 4);
-
-            try {
-                fs.renameSync(new_filepath, new_filepath + ".backup");
-            } catch (err) {}
-
-            console.log(`saved to '${new_filepath}' ${tab_contents.length} elements of type ${first_component.type}`);
-            promises.push(writeFile(new_filepath, tab_flow_new));
-        });
-
-        
-
-        when.all(promises).then(() => {
-            resolve();
-        });
-    });
-}
-
 function readFile(path, backupPath, emptyResponse, type) {
     return when.promise(function (resolve) {
         fs.readFile(path, 'utf8', function (err, data) {
             if (!err) {
                 if (data.length === 0) {
-                    //log.warn(log._("storage.localfilesystem.empty",{type:type}));
+                    log.warn(log._("storage.localfilesystem.empty", {
+                        type: type
+                    }));
                     try {
                         var backupStat = fs.statSync(backupPath);
                         if (backupStat.size === 0) {
@@ -219,11 +324,17 @@ function readFile(path, backupPath, emptyResponse, type) {
                             return resolve(emptyResponse);
                         }
                         // Empty flows, restore backup
-                        //log.warn(log._("storage.localfilesystem.restore",{path:backupPath,type:type}));
+                        log.warn(log._("storage.localfilesystem.restore", {
+                            path: backupPath,
+                            type: type
+                        }));
                         fs.copy(backupPath, path, function (backupCopyErr) {
                             if (backupCopyErr) {
                                 // Restore backup failed
-                                //log.warn(log._("storage.localfilesystem.restore-fail",{message:backupCopyErr.toString(),type:type}));
+                                log.warn(log._("storage.localfilesystem.restore-fail", {
+                                    message: backupCopyErr.toString(),
+                                    type: type
+                                }));
                                 resolve([]);
                             } else {
                                 // Loop back in to load the restored backup
@@ -239,12 +350,16 @@ function readFile(path, backupPath, emptyResponse, type) {
                 try {
                     return resolve(JSON.parse(data));
                 } catch (parseErr) {
-                    //log.warn(log._("storage.localfilesystem.invalid",{type:type}));
+                    log.warn(log._("storage.localfilesystem.invalid", {
+                        type: type
+                    }));
                     return resolve(emptyResponse);
                 }
             } else {
                 if (type === 'flow') {
-                    //log.info(log._("storage.localfilesystem.create",{type:type}));
+                    log.info(log._("storage.localfilesystem.create", {
+                        type: type
+                    }));
                 }
                 resolve(emptyResponse);
             }
@@ -323,73 +438,7 @@ var flowssplitter = {
     getFlows: function () {
         //return readFile(flowsFullPath, flowsFileBackup, [], 'flow');
 
-        var ffExt = fspath.extname(flowsFullPath);
-        var ffName = fspath.basename(flowsFullPath);
-        var ffBase = fspath.basename(flowsFullPath, ffExt);
-        var ffDir = fspath.dirname(flowsFullPath);
-
-        return when.promise((resolve, reject) => {
-
-            if (!initialFlowLoadComplete) {
-                initialFlowLoadComplete = true;
-
-                //log.info(log._("storage.localfilesystem.user-dir",{path:settings.userDir}));
-                //log.info(log._("storage.localfilesystem.flows-file",{path:flowsFullPath}));
-
-                if (fs.existsSync(flowsFullPath)) {
-                    readFile(flowsFullPath, flowsFileBackup, [], 'flow').then(function (flows) {
-                        fs.unlink(flowsFullPath);
-                        return writeFlows(flows);
-                    }).then(() => {
-                        resolve();
-                    })
-                    return;
-                }
-            }
-            console.log('skip');
-            resolve();
-        }).then(() => {
-            return when.promise((resolve, reject) => {
-                function escapeRegExp(str) {
-                    return str.replace(/[\-\[\]\/\{\}\(\)\*\+\?\.\\\^\$\|]/g, "\\$&");
-                }
-                var promises = [];
-
-                // tabs
-                var tab_regex_filter = escapeRegExp(ffBase) + "_tab_\\d+" + escapeRegExp(ffExt) + "$";
-                var tab_files = filter.sync(ffDir, function (fp) {
-                    return new RegExp(tab_regex_filter, "g").test(fp);
-                });
-                tab_files.forEach(function (flow_tab) {
-                    promises.push(readFile(flow_tab, flow_tab + ".backup", [], 'flow'));
-                });
-
-                // subflows
-                var subflow_regex_filter = escapeRegExp(ffBase) + "_subflow_.+" + escapeRegExp(ffExt) + "$";
-                var subflow_files = filter.sync(ffDir, function (fp) {
-                    return new RegExp(subflow_regex_filter, "g").test(fp);
-                });
-                subflow_files.forEach(function (subflow) {
-                    promises.push(readFile(subflow, subflow + ".backup", [], 'flow'));
-                });
-
-                // orphan
-                var orphan_filename = ffBase + '_orphans' + ffExt;
-                var orphan_filepath = fspath.join(ffDir, orphan_filename);
-                if (fs.existsSync(orphan_filepath))
-                    promises.push(readFile(orphan_filepath, orphan_filepath + ".backup", [], 'flow'));
-
-                return when.all(promises).then(values => {
-                    var flows = [];
-                    values.forEach(function (elements) {
-                        elements.forEach(function (tab_component) {
-                            flows.push(tab_component);
-                        });
-                    });
-                    resolve(flows);
-                });
-            });
-        });
+        return readFlows();
     },
 
     saveFlows: function (flows) {
@@ -429,7 +478,7 @@ var flowssplitter = {
                     try {
                         return resolve(JSON.parse(data));
                     } catch (err2) {
-                        //log.trace("Corrupted config detected - resetting");
+                        log.trace("Corrupted config detected - resetting");
                     }
                 }
                 return resolve({});
@@ -449,7 +498,7 @@ var flowssplitter = {
                     try {
                         return resolve(JSON.parse(data));
                     } catch (err2) {
-                        //log.trace("Corrupted sessions file - resetting");
+                        log.trace("Corrupted sessions file - resetting");
                     }
                 }
                 resolve({});
