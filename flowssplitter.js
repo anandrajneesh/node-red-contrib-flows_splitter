@@ -111,7 +111,11 @@ function writeFlows(flows) {
         var tab_idx = 0;
         _tabs_order.forEach(function (tab_id) {
 
-            var file_path = fspath.join(ffDir, ffBase + '_tab_' + (++tab_idx) + ffExt);
+            ++tab_idx;
+
+            var tab_idx_2_digits = (tab_idx < 10) ? '0' + tab_idx.toString() : tab_idx.toString();
+
+            var file_path = fspath.join(ffDir, ffBase + '_tab_' + tab_idx_2_digits + ffExt);
             var file_content = _tabs[tab_id];
 
             console.log(`saved tab index ${tab_idx} with ${file_content.length} element(s) to '${file_path}'`);
