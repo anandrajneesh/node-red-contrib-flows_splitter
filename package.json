@@ -11,6 +11,10 @@
     "fs-extra": "^3.0.1",
     "when": "^3.7.8"
   },
+  "repository": {
+      "type": "git",
+      "url": "https://github.com/MomentFactory/node-red-contrib-flows_splitter.git"
+    },
   "scripts": {
     "postinstall": "node scripts/npm-postinstall.js",
     "preuninstall": "node scripts/npm-preuninstall.js"
