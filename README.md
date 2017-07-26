@@ -31,7 +31,7 @@ For each subflow, it creates a file named [flows basename]\_sunflow\_[sunflow UU
 ## Instructions
 add this in settings
 ```
-storageModule: require("node-red-contrib-mf-flows_splitter"), 
+storageModule: require("node-red-contrib-flows_splitter"), 
 ```
 
 ## known bugs :
