@@ -1,4 +1,4 @@
-# node-red-contrib-mf-flows_splitter
+# node-red-contrib-flows_splitter
 Allow flows .json to be split in multiple local file.
 
 ### Tabs
