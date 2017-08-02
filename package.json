@@ -1,6 +1,6 @@
 {
   "name": "node-red-contrib-flows_splitter",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "Allow flows .json file to be split into multiple local files.",
   "main": "flowssplitter.js",
   "keywords": ["node-red","flows","flow"],
